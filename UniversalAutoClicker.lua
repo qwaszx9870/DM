@@ -1,26 +1,22 @@
--- Pirate Ship 自动咬人脚本（无参 Bite Remote 版）
--- 原理：日志确认 Bite 是 RemoteEvent，FireServer 无需参数
--- 找到 Bite Remote 后循环 FireServer 即可触发训练（力量增长）
+-- Pirate Ship 自动咬人脚本（Velvet UI + 无参 Bite Remote）
+-- 日志确认：ReplicatedStorage.Remotes.Bite 是 RemoteEvent，FireServer 无需参数
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
 local LocalPlayer = Players.LocalPlayer
 if not LocalPlayer then
     return
 end
 
--- 找 Bite Remote
+-- ============ 找 Bite Remote ============
 local function getBiteRemote()
     local remotes = ReplicatedStorage:FindFirstChild("Remotes")
-    if not remotes then
-        return nil
+    if remotes then
+        local bite = remotes:FindFirstChild("Bite")
+        if bite and bite:IsA("RemoteEvent") then
+            return bite
+        end
     end
-    local bite = remotes:FindFirstChild("Bite")
-    if bite and bite:IsA("RemoteEvent") then
-        return bite
-    end
-    -- 兜底：递归找
     for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
         if v.Name == "Bite" and v:IsA("RemoteEvent") then
             return v
@@ -34,15 +30,13 @@ if not biteRemote then
     warn("[连点器] 未找到 Bite Remote，请确认已进入游戏")
     return
 end
-
 print("[连点器] 找到 Bite Remote:", biteRemote:GetFullName())
 
--- 配置
+-- ============ 状态 ============
 local enabled = false
-local interval = 0.05  -- 秒，可调
+local interval = 0.05
 
--- 自动循环
-local conn
+-- ============ 自动循环 ============
 task.spawn(function()
     while true do
         if enabled then
@@ -57,43 +51,51 @@ task.spawn(function()
     end
 end)
 
--- UI 切换按钮（绿色开 / 红色关）
-local userInputService = game:GetService("UserInputService")
-if userInputService.TouchEnabled or userInputService.MouseEnabled then
-    task.spawn(function()
-        local screenGui = Instance.new("ScreenGui")
-        screenGui.Name = "AutoBite"
-        screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+-- ============ Velvet UI ============
+local repo = "https://raw.githubusercontent.com/DexCodeSX/Velvet/main/"
+local Velvet = loadstring(game:HttpGet(repo .. "Library.lua"))()
+local Icons = loadstring(game:HttpGet(repo .. "addons/Icons.lua"))()
+Velvet:SetIcons(Icons)
 
-        local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 160, 0, 50)
-        btn.Position = UDim2.new(0.5, -80, 0.05, 0)
-        btn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
-        btn.Text = "自动咬人：关"
-        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
-        btn.TextSize = 20
-        btn.Parent = screenGui
+local Window = Velvet:CreateWindow({
+    Title = "自动咬人",
+    SubTitle = "Pirate Ship",
+    ToggleKey = Enum.KeyCode.RightShift,
+})
 
-        local function updateUI()
-            if enabled then
-                btn.BackgroundColor3 = Color3.fromRGB(40, 180, 60)
-                btn.Text = "自动咬人：开"
-            else
-                btn.BackgroundColor3 = Color3.fromRGB(200, 40, 40)
-                btn.Text = "自动咬人：关"
-            end
-        end
+local Tab = Window:AddTab("自动", "sparkles")
+local Section = Tab:AddSection("咬人设置")
 
-        btn.MouseButton1Click:Connect(function()
-            enabled = not enabled
-            updateUI()
-        end)
+-- 总开关
+Section:AddToggle("AutoToggle", {
+    Text = "自动咬人",
+    Default = false,
+    Callback = function(v)
+        enabled = v
+        print("[连点器] 自动咬人:", enabled)
+    end,
+})
 
-        btn.Activated:Connect(function()
-            enabled = not enabled
-            updateUI()
-        end)
-    end)
-end
+-- 间隔滑块
+Section:AddSlider("IntervalSlider", {
+    Text = "间隔(秒)",
+    Min = 0.01, Max = 1, Default = 0.05,
+    Suffix = "s",
+    Callback = function(v)
+        interval = v
+    end,
+})
 
-print("[连点器] 脚本已加载，点击左上角按钮开启自动咬人")
+Section:AddParagraph({
+    Title = "说明",
+    Content = "开启「自动咬人」后，会持续调用 Bite Remote 训练。间隔越小越快，建议不低于 0.05s 以免被服务器限制。",
+})
+
+Velvet:Notify({
+    Title = "加载完成",
+    Content = "找到 Bite Remote，可开始使用",
+    Duration = 3,
+    Type = "success",
+})
+
+print("[连点器] Velvet UI 加载完成")
