@@ -1,6 +1,6 @@
 -- ============================================================
---  通用智能自动连点器 v2.0 - Velvet UI
---  自动检测 Remote → 优先调 Remote → 兜底模拟鼠标
+--  通用智能自动连点器 v3.0 - Velvet UI
+--  自动检测 Remote → 直接调 Remote 点击 (非模拟鼠标)
 --  执行即用，无需配置
 --  UI: Velvet Library (github.com/DexCodeSX/Velvet)
 -- ============================================================
@@ -14,7 +14,6 @@ Velvet:SetIcons(Icons)
 -- ==================== 核心引用 ====================
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local VirtualInputManager = game:GetService("VirtualInputManager")
 local LocalPlayer = Players.LocalPlayer
 
 -- ==================== 状态 ====================
@@ -23,19 +22,17 @@ local State = {
     TotalClicks = 0,
     StartTime = 0,
     ClicksPerSecond = 0,
-    DetectionDone = false,
     DetectedRemotes = {},
-    ClickMethod = "unknown", -- "remote" | "mouse" | "touch"
+    ActiveRemote = nil, -- 当前使用的 Remote
+    DetectionDone = false,
 }
 
 -- ==================== 配置 ====================
 local CONFIG = {
     ClickSpeed = 10,
-    ClickDelay = 0.01,
 }
 
 -- ==================== Remote 自动检测 ====================
--- 常见点击类 Remote 关键词
 local CLICK_KEYWORDS = {
     "click", "Click", "CLICK",
     "tap", "Tap", "TAP",
@@ -54,23 +51,45 @@ local CLICK_KEYWORDS = {
     "input", "Input", "INPUT",
     "interact", "Interact", "INTERACT",
     "use", "Use", "USE",
+    "activate", "Activate", "ACTIVATE",
+    "trigger", "Trigger", "TRIGGER",
+    "press", "Press", "PRESS",
+    "hold", "Hold", "HOLD",
+    "boost", "Boost", "BOOST",
+    "claim", "Claim", "CLAIM",
+    "buy", "Buy", "BUY",
+    "sell", "Sell", "SELL",
+    "upgrade", "Upgrade", "UPGRADE",
+    "equip", "Equip", "EQUIP",
+    "select", "Select", "SELECT",
+    "submit", "Submit", "SUBMIT",
+    "confirm", "Confirm", "CONFIRM",
+    "start", "Start", "START",
+    "begin", "Begin", "BEGIN",
+    "roll", "Roll", "ROLL",
+    "spin", "Spin", "SPIN",
+    "open", "Open", "OPEN",
+    "grab", "Grab", "GRAB",
+    "pick", "Pick", "PICK",
+    "get", "Get", "GET",
+    "send", "Send", "SEND",
+    "do", "Do", "DO",
+    "run", "Run", "RUN",
+    "go", "Go", "GO",
 }
 
 local function isClickRelated(name)
     for _, kw in ipairs(CLICK_KEYWORDS) do
-        if string.find(name, kw) then return true end
+        if string.find(name, kw, 1, true) then return true end
     end
     return false
 end
 
 local function scanForRemotes(parent, depth)
     depth = depth or 0
-    if depth > 5 then return {} end
-
+    if depth > 6 then return {} end
     local found = {}
-
     for _, child in ipairs(parent:GetChildren()) do
-        -- 检测 RemoteEvent / RemoteFunction
         if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
             if isClickRelated(child.Name) then
                 table.insert(found, {
@@ -78,31 +97,29 @@ local function scanForRemotes(parent, depth)
                     Object = child,
                     Type = child.ClassName,
                     Path = child:GetFullName(),
-                    Score = #child.Name, -- 越短越可能是核心 Remote
+                    Score = #child.Name,
                 })
             end
         end
-
         -- 递归搜索子目录
-        if child:IsA("Folder") or child:IsA("Model") or child:IsA("Configuration") then
-            local sub = scanForRemotes(child, depth + 1)
-            for _, s in ipairs(sub) do
-                table.insert(found, s)
+        pcall(function()
+            for _, sub in ipairs(child:GetChildren()) do
+                if sub:IsA("Folder") or sub:IsA("Model") or sub:IsA("Configuration") then
+                    local nested = scanForRemotes(sub, depth + 1)
+                    for _, n in ipairs(nested) do table.insert(found, n) end
+                end
             end
-        end
+        end)
     end
-
     return found
 end
 
 local function detectAndSortRemotes()
     local all = {}
-
-    -- 扫描 ReplicatedStorage
-    local rsRemotes = scanForRemotes(ReplicatedStorage)
-    for _, r in ipairs(rsRemotes) do table.insert(all, r) end
-
-    -- 也扫描 workspace 下的脚本
+    pcall(function()
+        local rsRemotes = scanForRemotes(ReplicatedStorage)
+        for _, r in ipairs(rsRemotes) do table.insert(all, r) end
+    end)
     pcall(function()
         for _, child in ipairs(workspace:GetChildren()) do
             local sub = scanForRemotes(child)
@@ -110,7 +127,7 @@ local function detectAndSortRemotes()
         end
     end)
 
-    -- 按分数排序 (越短越优先，优先 RemoteEvent)
+    -- 排序: RemoteEvent 优先于 RemoteFunction，名字越短越优先
     table.sort(all, function(a, b)
         if a.Type == "RemoteEvent" and b.Type == "RemoteFunction" then return true end
         if b.Type == "RemoteEvent" and a.Type == "RemoteFunction" then return false end
@@ -120,27 +137,13 @@ local function detectAndSortRemotes()
     return all
 end
 
--- ==================== 点击方法 ====================
-local function clickViaRemote(remote)
+-- ==================== 核心点击 ====================
+local function fireRemoteClick(remote)
     if remote.Type == "RemoteEvent" then
         pcall(function() remote.Object:FireServer() end)
     elseif remote.Type == "RemoteFunction" then
         pcall(function() remote.Object:InvokeServer() end)
     end
-    State.TotalClicks = State.TotalClicks + 1
-end
-
-local function clickViaMouse()
-    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, true, nil, 0)
-    VirtualInputManager:SendMouseButtonEvent(0, 0, 0, false, nil, 0)
-    State.TotalClicks = State.TotalClicks + 1
-end
-
-local function clickViaTouch()
-    local cam = workspace.CurrentCamera
-    local size = cam.ViewportSize
-    VirtualInputManager:SendTouchEvent(size.X / 2, size.Y / 2, 0, Enum.UserInputState.Begin, nil)
-    VirtualInputManager:SendTouchEvent(size.X / 2, size.Y / 2, 0, Enum.UserInputState.End, nil)
     State.TotalClicks = State.TotalClicks + 1
 end
 
@@ -165,63 +168,37 @@ end
 
 -- ==================== 主循环 ====================
 local function mainLoop()
+    if not State.ActiveRemote then
+        Velvet:Notify({
+            Title = "错误",
+            Content = "未检测到可用 Remote，请先检测",
+            Duration = 3,
+            Type = "error",
+        })
+        State.IsRunning = false
+        return
+    end
+
     State.IsRunning = true
     State.StartTime = os.clock()
     State.TotalClicks = 0
 
-    -- 选择点击方法
-    local clickMethod = clickViaMouse -- 默认
-    local detectedInfo = "未检测到 Remote，使用鼠标模拟"
+    local activeRemote = State.ActiveRemote
 
-    if #State.DetectedRemotes > 0 then
-        local best = State.DetectedRemotes[1]
-        -- 测试 Remote 是否可用
-        local ok, err = pcall(function()
-            if best.Type == "RemoteEvent" then
-                best.Object:FireServer()
-            else
-                best.Object:InvokeServer()
-            end
-        end)
-
-        if ok then
-            clickMethod = clickViaRemote
-            State.ClickMethod = "remote"
-            detectedInfo = string.format("检测到 Remote: %s (%s)", best.Name, best.Type)
-            Velvet:Notify({
-                Title = "检测成功",
-                Content = string.format("使用 Remote 点击: %s", best.Name),
-                Duration = 3,
-                Type = "success",
-            })
-        else
-            detectedInfo = string.format("Remote %s 不可用，降级为鼠标模拟", best.Name)
-            Velvet:Notify({
-                Title = "降级",
-                Content = detectedInfo,
-                Duration = 3,
-                Type = "warning",
-            })
-        end
-    else
-        Velvet:Notify({
-            Title = "检测结果",
-            Content = "未检测到点击 Remote，使用鼠标模拟",
-            Duration = 3,
-            Type = "info",
-        })
-    end
-
-    Velvet:Notify({ Title = "启动", Content = "自动连点已启动！", Duration = 2, Type = "success" })
+    Velvet:Notify({
+        Title = "启动",
+        Content = string.format("使用 Remote: %s 开始连点", activeRemote.Name),
+        Duration = 2,
+        Type = "success",
+    })
 
     while State.IsRunning do
         local now = os.clock()
 
         for i = 1, CONFIG.ClickSpeed do
-            clickMethod(State.DetectedRemotes[1])
+            fireRemoteClick(activeRemote)
         end
 
-        -- 更新 CPS
         if State.TotalClicks % (CONFIG.ClickSpeed * 2) == 0 then
             local elapsed = now - State.StartTime
             if elapsed > 0 then
@@ -233,27 +210,72 @@ local function mainLoop()
     end
 end
 
--- ==================== 检测并构建 UI ====================
-State.DetectedRemotes = detectAndSortRemotes()
+-- ==================== 检测并选择 Remote ====================
+local function runDetection()
+    State.DetectedRemotes = detectAndSortRemotes()
 
-local detectedText = "未检测到 Remote"
-local remoteList = ""
-if #State.DetectedRemotes > 0 then
-    detectedText = string.format("检测到 %d 个 Remote", #State.DetectedRemotes)
-    local items = {}
-    for i, r in ipairs(State.DetectedRemotes) do
-        table.insert(items, string.format("  %d. %s (%s)", i, r.Name, r.Type))
-        if i >= 5 then break end
+    if #State.DetectedRemotes > 0 then
+        -- 测试第一个 Remote 是否可用
+        local best = State.DetectedRemotes[1]
+        local ok, err = pcall(function()
+            if best.Type == "RemoteEvent" then
+                best.Object:FireServer()
+            else
+                best.Object:InvokeServer()
+            end
+        end)
+
+        if ok then
+            State.ActiveRemote = best
+            Velvet:Notify({
+                Title = "检测成功",
+                Content = string.format("使用: %s (%s)", best.Name, best.Type),
+                Duration = 3,
+                Type = "success",
+            })
+            return true
+        else
+            -- 尝试下一个
+            for i = 2, #State.DetectedRemotes do
+                local alt = State.DetectedRemotes[i]
+                local ok2 = pcall(function()
+                    if alt.Type == "RemoteEvent" then
+                        alt.Object:FireServer()
+                    else
+                        alt.Object:InvokeServer()
+                    end
+                end)
+                if ok2 then
+                    State.ActiveRemote = alt
+                    Velvet:Notify({
+                        Title = "检测成功",
+                        Content = string.format("使用: %s (%s)", alt.Name, alt.Type),
+                        Duration = 3,
+                        Type = "success",
+                    })
+                    return true
+                end
+            end
+        end
     end
-    remoteList = table.concat(items, "\n")
+
+    -- 全失败
+    Velvet:Notify({
+        Title = "检测失败",
+        Content = "未找到可用 Remote，请手动抓包",
+        Duration = 4,
+        Type = "error",
+    })
+    return false
 end
 
-State.DetectionDone = true
+-- 首次检测
+State.DetectionDone = runDetection()
 
 -- ==================== Velvet UI ====================
 local Window = Velvet:CreateWindow({
     Title = "Smart Auto Clicker",
-    SubTitle = "v2.0 · Auto Detect",
+    SubTitle = "v3.0 · Remote Click",
     ToggleKey = Enum.KeyCode.RightShift,
 })
 
@@ -268,6 +290,15 @@ ToggleSection:AddToggle("RunToggle", {
     Default = false,
     Callback = function(v)
         if v and not isRunning then
+            if not State.ActiveRemote then
+                Velvet:Notify({
+                    Title = "无法启动",
+                    Content = "未检测到可用 Remote，请先检测",
+                    Duration = 3,
+                    Type = "error",
+                })
+                return
+            end
             isRunning = true
             task.spawn(function() mainLoop() end)
         elseif not v then
@@ -282,11 +313,11 @@ ToggleSection:AddSlider("ClickSpeed", {
     Text = "点击速度",
     Min = 1, Max = 100, Default = 10,
     Suffix = "次/秒",
-    Callback = function(v)
-        CONFIG.ClickSpeed = v
-        CONFIG.ClickDelay = 1 / v
-    end,
+    Callback = function(v) CONFIG.ClickSpeed = v end,
 })
+
+local activeName = State.ActiveRemote and State.ActiveRemote.Name or "无"
+local activeType = State.ActiveRemote and State.ActiveRemote.Type or "-"
 
 local StatsSection = MainTab:AddSection("实时数据")
 StatsSection:AddParagraph({
@@ -295,18 +326,36 @@ StatsSection:AddParagraph({
         "⚡ CPS: 0/s\n" ..
         "👆 总点击: 0\n" ..
         "⏱ 运行: 0s\n" ..
-        "🔧 方式: %s",
-        #State.DetectedRemotes > 0 and "Remote 调用" or "鼠标模拟"
+        "🔧 Remote: %s (%s)",
+        activeName, activeType
     ),
 })
 
--- ---------- Tab 2: 检测结果 ----------
+-- ---------- Tab 2: 检测 ----------
 local DetectTab = Window:AddTab("检测", "search")
 
 local DetectSection = DetectTab:AddSection("Remote 检测结果")
+local detectCount = #State.DetectedRemotes
+local detectTitle = detectCount > 0
+    and string.format("检测到 %d 个 Remote", detectCount)
+    or "未检测到可用 Remote"
+
+local detectContent = ""
+if detectCount > 0 then
+    local items = {}
+    for i, r in ipairs(State.DetectedRemotes) do
+        local marker = (State.ActiveRemote == r) and " ✅" or ""
+        table.insert(items, string.format("  %d. %s (%s)%s", i, r.Name, r.Type, marker))
+        if i >= 10 then break end
+    end
+    detectContent = table.concat(items, "\n")
+else
+    detectContent = "请用 RemoteSpy 抓取点击操作的 Remote，\n将名称加入脚本关键词列表"
+end
+
 DetectSection:AddParagraph({
-    Title = detectedText,
-    Content = remoteList ~= "" and remoteList or "将使用 VirtualInputManager 模拟鼠标点击",
+    Title = detectTitle,
+    Content = detectContent,
 })
 
 DetectSection:AddDivider()
@@ -314,26 +363,13 @@ DetectSection:AddDivider()
 DetectSection:AddButton({
     Text = "重新检测",
     Callback = function()
-        State.DetectedRemotes = detectAndSortRemotes()
-        local count = #State.DetectedRemotes
-        if count > 0 then
-            local names = {}
-            for i, r in ipairs(State.DetectedRemotes) do
-                table.insert(names, r.Name)
-                if i >= 5 then break end
-            end
+        local ok = runDetection()
+        if ok and State.ActiveRemote then
             Velvet:Notify({
-                Title = "重新检测",
-                Content = string.format("找到 %d 个 Remote: %s", count, table.concat(names, ", ")),
-                Duration = 4,
-                Type = "success",
-            })
-        else
-            Velvet:Notify({
-                Title = "重新检测",
-                Content = "未找到点击 Remote，将使用鼠标模拟",
+                Title = "检测完成",
+                Content = string.format("使用: %s (%s)", State.ActiveRemote.Name, State.ActiveRemote.Type),
                 Duration = 3,
-                Type = "info",
+                Type = "success",
             })
         end
     end,
@@ -344,16 +380,14 @@ local InfoTab = Window:AddTab("信息", "info")
 
 local InfoSection = InfoTab:AddSection("关于脚本")
 InfoSection:AddParagraph({
-    Title = "智能自动连点器 v2.0",
-    Content = "执行即用，无需配置。\n\n" ..
+    Title = "智能自动连点器 v3.0",
+    Content = "纯 Remote 调用，非模拟鼠标。\n\n" ..
         "工作流程:\n" ..
-        "  1. 自动扫描游戏中的 Remote\n" ..
-        "  2. 匹配点击类关键词\n" ..
-        "  3. 测试 Remote 可用性\n" ..
-        "  4. 优先调 Remote，兜底模拟鼠标\n\n" ..
-        "检测关键词: click/tap/hit/kick/fire/\n" ..
-        "  punch/attack/shoot/swing/collect/\n" ..
-        "  farm/heat/add/action/input/interact\n\n" ..
+        "  1. 扫描游戏中的 RemoteEvent/RemoteFunction\n" ..
+        "  2. 匹配 40+ 点击关键词\n" ..
+        "  3. 测试可用性\n" ..
+        "  4. 直接 FireServer/InvokeServer 调用\n\n" ..
+        "不模拟鼠标，不模拟触摸，直接调 Remote。\n\n" ..
         "UI: Velvet Library\n" ..
         "按 RightShift 打开/关闭",
 })
@@ -364,32 +398,37 @@ InfoSection:AddParagraph({
     Title = "操作说明",
     Content = "1. 执行脚本 → 自动检测\n" ..
         "2. 按 RightShift 打开面板\n" ..
-        "3. 查看「检测」标签页看结果\n" ..
-        "4. 回到「主控」开启连点",
+        "3. 去「检测」标签页确认结果\n" ..
+        "4. 回「主控」开启连点\n\n" ..
+        "如果检测不到，说明游戏 Remote 命名\n" ..
+        "不在关键词列表里，需要抓包分析",
 })
 
 -- ==================== 启动 ====================
-local methodLabel = #State.DetectedRemotes > 0
-    and string.format("Remote: %s", State.DetectedRemotes[1].Name)
-    or "鼠标模拟"
+local methodInfo = State.ActiveRemote
+    and string.format("Remote: %s (%s)", State.ActiveRemote.Name, State.ActiveRemote.Type)
+    or "未检测到"
 
 Velvet:Notify({
     Title = "Smart Auto Clicker",
-    Content = string.format("v2.0 已加载！检测结果: %s", methodLabel),
+    Content = string.format("v3.0 已加载！%s", methodInfo),
     Duration = 5,
-    Type = "success",
+    Type = State.ActiveRemote and "success" or "warning",
 })
 
 print("========================================")
-print(" Smart Auto Clicker v2.0 - Velvet UI")
-print(" 自动检测 + 智能点击")
+print(" Smart Auto Clicker v3.0 - Remote Click")
+print(" 纯 Remote 调用，不模拟鼠标")
 print("========================================")
-print(" 检测结果:", methodLabel)
+print(" 检测结果:", methodInfo)
 if #State.DetectedRemotes > 0 then
     for i, r in ipairs(State.DetectedRemotes) do
-        print(string.format("  %d. %s (%s) - %s", i, r.Name, r.Type, r.Path))
+        local active = (State.ActiveRemote == r) and " ← 当前使用" or ""
+        print(string.format("  %d. %s (%s) - %s%s", i, r.Name, r.Type, r.Path, active))
         if i >= 10 then break end
     end
+else
+    print("  未检测到可用 Remote，请用 RemoteSpy 抓包")
 end
 print("========================================")
 print(" 操作: 按 RightShift 打开面板")
