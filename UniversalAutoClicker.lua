@@ -1,7 +1,7 @@
 -- ============================================================
---  通用智能自动连点器 v3.0 - Velvet UI
---  自动检测 Remote → 直接调 Remote 点击 (非模拟鼠标)
---  执行即用，无需配置
+--  通用智能自动连点器 v4.0 - Velvet UI
+--  内置 RemoteSpy: 你点一下，脚本自动学会
+--  无需手动抓包，无需导出日志
 --  UI: Velvet Library (github.com/DexCodeSX/Velvet)
 -- ============================================================
 
@@ -14,17 +14,21 @@ Velvet:SetIcons(Icons)
 -- ==================== 核心引用 ====================
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
 local LocalPlayer = Players.LocalPlayer
 
 -- ==================== 状态 ====================
 local State = {
     IsRunning = false,
+    IsLearning = false,          -- 学习模式
     TotalClicks = 0,
     StartTime = 0,
     ClicksPerSecond = 0,
-    DetectedRemotes = {},
-    ActiveRemote = nil, -- 当前使用的 Remote
-    DetectionDone = false,
+    ActiveRemote = nil,           -- 当前使用的 Remote
+    AllRemotes = {},              -- 所有检测到的 Remote
+    CapturedRemote = nil,         -- 学习到的 Remote
+    HookedRemotes = {},           -- 已 hook 的 Remote 引用
 }
 
 -- ==================== 配置 ====================
@@ -32,110 +36,117 @@ local CONFIG = {
     ClickSpeed = 10,
 }
 
--- ==================== Remote 自动检测 ====================
-local CLICK_KEYWORDS = {
-    "click", "Click", "CLICK",
-    "tap", "Tap", "TAP",
-    "hit", "Hit", "HIT",
-    "kick", "Kick", "KICK",
-    "fire", "Fire", "FIRE",
-    "punch", "Punch", "PUNCH",
-    "attack", "Attack", "ATTACK",
-    "shoot", "Shoot", "SHOOT",
-    "swing", "Swing", "SWING",
-    "collect", "Collect", "COLLECT",
-    "farm", "Farm", "FARM",
-    "heat", "Heat", "HEAT",
-    "add", "Add", "ADD",
-    "action", "Action", "ACTION",
-    "input", "Input", "INPUT",
-    "interact", "Interact", "INTERACT",
-    "use", "Use", "USE",
-    "activate", "Activate", "ACTIVATE",
-    "trigger", "Trigger", "TRIGGER",
-    "press", "Press", "PRESS",
-    "hold", "Hold", "HOLD",
-    "boost", "Boost", "BOOST",
-    "claim", "Claim", "CLAIM",
-    "buy", "Buy", "BUY",
-    "sell", "Sell", "SELL",
-    "upgrade", "Upgrade", "UPGRADE",
-    "equip", "Equip", "EQUIP",
-    "select", "Select", "SELECT",
-    "submit", "Submit", "SUBMIT",
-    "confirm", "Confirm", "CONFIRM",
-    "start", "Start", "START",
-    "begin", "Begin", "BEGIN",
-    "roll", "Roll", "ROLL",
-    "spin", "Spin", "SPIN",
-    "open", "Open", "OPEN",
-    "grab", "Grab", "GRAB",
-    "pick", "Pick", "PICK",
-    "get", "Get", "GET",
-    "send", "Send", "SEND",
-    "do", "Do", "DO",
-    "run", "Run", "RUN",
-    "go", "Go", "GO",
-}
+-- ==================== 内置 RemoteSpy: Hook 所有 Remote ====================
+local function hookRemoteEvent(remoteEvent)
+    local name = remoteEvent.Name
+    local path = pcall(function() return remoteEvent:GetFullName() end) and remoteEvent:GetFullName() or name
 
-local function isClickRelated(name)
-    for _, kw in ipairs(CLICK_KEYWORDS) do
-        if string.find(name, kw, 1, true) then return true end
-    end
-    return false
+    -- Hook FireServer
+    local oldFireServer = hookfunction(remoteEvent.FireServer, function(self, ...)
+        -- 学习模式下记录
+        if State.IsLearning then
+            State.CapturedRemote = {
+                Name = name,
+                Object = self,
+                Type = "RemoteEvent",
+                Path = path,
+                Args = {...},
+            }
+            State.IsLearning = false
+            Velvet:Notify({
+                Title = "学习成功！",
+                Content = string.format("捕获到 Remote: %s (RemoteEvent)", name),
+                Duration = 4,
+                Type = "success",
+            })
+            print("[RemoteSpy] 捕获 RemoteEvent:", name, "参数:", ...)
+        end
+        -- 正常调用
+        return oldFireServer(self, ...)
+    end)
+
+    table.insert(State.HookedRemotes, { Object = remoteEvent, Name = name, Type = "RemoteEvent", Path = path })
 end
 
-local function scanForRemotes(parent, depth)
-    depth = depth or 0
-    if depth > 6 then return {} end
-    local found = {}
-    for _, child in ipairs(parent:GetChildren()) do
-        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-            if isClickRelated(child.Name) then
-                table.insert(found, {
-                    Name = child.Name,
-                    Object = child,
-                    Type = child.ClassName,
-                    Path = child:GetFullName(),
-                    Score = #child.Name,
-                })
-            end
+local function hookRemoteFunction(remoteFunction)
+    local name = remoteFunction.Name
+    local path = pcall(function() return remoteFunction:GetFullName() end) and remoteFunction:GetFullName() or name
+
+    local oldInvoke = hookfunction(remoteFunction.InvokeServer, function(self, ...)
+        if State.IsLearning then
+            State.CapturedRemote = {
+                Name = name,
+                Object = self,
+                Type = "RemoteFunction",
+                Path = path,
+                Args = {...},
+            }
+            State.IsLearning = false
+            Velvet:Notify({
+                Title = "学习成功！",
+                Content = string.format("捕获到 Remote: %s (RemoteFunction)", name),
+                Duration = 4,
+                Type = "success",
+            })
+            print("[RemoteSpy] 捕获 RemoteFunction:", name, "参数:", ...)
         end
-        -- 递归搜索子目录
+        return oldInvoke(self, ...)
+    end)
+
+    table.insert(State.HookedRemotes, { Object = remoteFunction, Name = name, Type = "RemoteFunction", Path = path })
+end
+
+local function scanAndHookAllRemotes(parent, depth)
+    depth = depth or 0
+    if depth > 6 then return end
+    for _, child in ipairs(parent:GetChildren()) do
+        if child:IsA("RemoteEvent") then
+            pcall(function() hookRemoteEvent(child) end)
+            table.insert(State.AllRemotes, { Name = child.Name, Type = "RemoteEvent", Path = child:GetFullName() })
+        elseif child:IsA("RemoteFunction") then
+            pcall(function() hookRemoteFunction(child) end)
+            table.insert(State.AllRemotes, { Name = child.Name, Type = "RemoteFunction", Path = child:GetFullName() })
+        end
         pcall(function()
             for _, sub in ipairs(child:GetChildren()) do
                 if sub:IsA("Folder") or sub:IsA("Model") or sub:IsA("Configuration") then
-                    local nested = scanForRemotes(sub, depth + 1)
-                    for _, n in ipairs(nested) do table.insert(found, n) end
+                    scanAndHookAllRemotes(sub, depth + 1)
                 end
             end
         end)
     end
-    return found
 end
 
-local function detectAndSortRemotes()
-    local all = {}
-    pcall(function()
-        local rsRemotes = scanForRemotes(ReplicatedStorage)
-        for _, r in ipairs(rsRemotes) do table.insert(all, r) end
-    end)
-    pcall(function()
-        for _, child in ipairs(workspace:GetChildren()) do
-            local sub = scanForRemotes(child)
-            for _, s in ipairs(sub) do table.insert(all, s) end
+-- 扫描 ReplicatedStorage
+pcall(function() scanAndHookAllRemotes(ReplicatedStorage) end)
+-- 扫描 workspace
+pcall(function()
+    for _, child in ipairs(workspace:GetChildren()) do
+        scanAndHookAllRemotes(child)
+    end
+end)
+
+-- 持续监听新 Remote (游戏可能延迟加载)
+local function watchForNewRemotes()
+    local function onDescendantAdded(descendant)
+        if descendant:IsA("RemoteEvent") then
+            pcall(function() hookRemoteEvent(descendant) end)
+            table.insert(State.AllRemotes, { Name = descendant.Name, Type = "RemoteEvent", Path = descendant:GetFullName() })
+        elseif descendant:IsA("RemoteFunction") then
+            pcall(function() hookRemoteFunction(descendant) end)
+            table.insert(State.AllRemotes, { Name = descendant.Name, Type = "RemoteFunction", Path = descendant:GetFullName() })
         end
+    end
+    ReplicatedStorage.DescendantAdded:Connect(onDescendantAdded)
+    pcall(function()
+        workspace.DescendantAdded:Connect(function(descendant)
+            if descendant:IsA("RemoteEvent") or descendant:IsA("RemoteFunction") then
+                onDescendantAdded(descendant)
+            end
+        end)
     end)
-
-    -- 排序: RemoteEvent 优先于 RemoteFunction，名字越短越优先
-    table.sort(all, function(a, b)
-        if a.Type == "RemoteEvent" and b.Type == "RemoteFunction" then return true end
-        if b.Type == "RemoteEvent" and a.Type == "RemoteFunction" then return false end
-        return a.Score < b.Score
-    end)
-
-    return all
 end
+pcall(watchForNewRemotes)
 
 -- ==================== 核心点击 ====================
 local function fireRemoteClick(remote)
@@ -166,28 +177,71 @@ local function formatTime(seconds)
     else return string.format("%ds", s) end
 end
 
+-- ==================== 学习模式: 等待用户点击 ====================
+local function startLearning()
+    if State.IsRunning then
+        Velvet:Notify({
+            Title = "请先停止",
+            Content = "请先停止连点再学习",
+            Duration = 3,
+            Type = "warning",
+        })
+        return
+    end
+
+    State.IsLearning = true
+    State.CapturedRemote = nil
+
+    Velvet:Notify({
+        Title = "学习模式",
+        Content = "请在游戏里点击一次！",
+        Duration = 10,
+        Type = "info",
+    })
+
+    print("[RemoteSpy] 学习模式已开启，在游戏里点击一次...")
+
+    -- 60 秒超时
+    task.delay(60, function()
+        if State.IsLearning then
+            State.IsLearning = false
+            Velvet:Notify({
+                Title = "超时",
+                Content = "60 秒内未检测到点击，请重试",
+                Duration = 4,
+                Type = "error",
+            })
+        end
+    end)
+end
+
 -- ==================== 主循环 ====================
 local function mainLoop()
     if not State.ActiveRemote then
-        Velvet:Notify({
-            Title = "错误",
-            Content = "未检测到可用 Remote，请先检测",
-            Duration = 3,
-            Type = "error",
-        })
-        State.IsRunning = false
-        return
+        -- 尝试用学习到的
+        if State.CapturedRemote then
+            State.ActiveRemote = State.CapturedRemote
+        else
+            Velvet:Notify({
+                Title = "未学习",
+                Content = "请先点「学习」按钮，然后在游戏里点一下",
+                Duration = 4,
+                Type = "error",
+            })
+            State.IsRunning = false
+            return
+        end
     end
 
     State.IsRunning = true
     State.StartTime = os.clock()
     State.TotalClicks = 0
 
-    local activeRemote = State.ActiveRemote
+    local active = State.ActiveRemote
 
     Velvet:Notify({
         Title = "启动",
-        Content = string.format("使用 Remote: %s 开始连点", activeRemote.Name),
+        Content = string.format("使用: %s 开始连点", active.Name),
         Duration = 2,
         Type = "success",
     })
@@ -196,7 +250,7 @@ local function mainLoop()
         local now = os.clock()
 
         for i = 1, CONFIG.ClickSpeed do
-            fireRemoteClick(activeRemote)
+            fireRemoteClick(active)
         end
 
         if State.TotalClicks % (CONFIG.ClickSpeed * 2) == 0 then
@@ -210,72 +264,10 @@ local function mainLoop()
     end
 end
 
--- ==================== 检测并选择 Remote ====================
-local function runDetection()
-    State.DetectedRemotes = detectAndSortRemotes()
-
-    if #State.DetectedRemotes > 0 then
-        -- 测试第一个 Remote 是否可用
-        local best = State.DetectedRemotes[1]
-        local ok, err = pcall(function()
-            if best.Type == "RemoteEvent" then
-                best.Object:FireServer()
-            else
-                best.Object:InvokeServer()
-            end
-        end)
-
-        if ok then
-            State.ActiveRemote = best
-            Velvet:Notify({
-                Title = "检测成功",
-                Content = string.format("使用: %s (%s)", best.Name, best.Type),
-                Duration = 3,
-                Type = "success",
-            })
-            return true
-        else
-            -- 尝试下一个
-            for i = 2, #State.DetectedRemotes do
-                local alt = State.DetectedRemotes[i]
-                local ok2 = pcall(function()
-                    if alt.Type == "RemoteEvent" then
-                        alt.Object:FireServer()
-                    else
-                        alt.Object:InvokeServer()
-                    end
-                end)
-                if ok2 then
-                    State.ActiveRemote = alt
-                    Velvet:Notify({
-                        Title = "检测成功",
-                        Content = string.format("使用: %s (%s)", alt.Name, alt.Type),
-                        Duration = 3,
-                        Type = "success",
-                    })
-                    return true
-                end
-            end
-        end
-    end
-
-    -- 全失败
-    Velvet:Notify({
-        Title = "检测失败",
-        Content = "未找到可用 Remote，请手动抓包",
-        Duration = 4,
-        Type = "error",
-    })
-    return false
-end
-
--- 首次检测
-State.DetectionDone = runDetection()
-
 -- ==================== Velvet UI ====================
 local Window = Velvet:CreateWindow({
     Title = "Smart Auto Clicker",
-    SubTitle = "v3.0 · Remote Click",
+    SubTitle = "v4.0 · 内置 RemoteSpy",
     ToggleKey = Enum.KeyCode.RightShift,
 })
 
@@ -285,20 +277,16 @@ local isRunning = false
 
 local ToggleSection = MainTab:AddSection("运行控制")
 
+ToggleSection:AddButton({
+    Text = "🎯 学习: 在游戏里点一下",
+    Callback = function() startLearning() end,
+})
+
 ToggleSection:AddToggle("RunToggle", {
     Text = "自动连点",
     Default = false,
     Callback = function(v)
         if v and not isRunning then
-            if not State.ActiveRemote then
-                Velvet:Notify({
-                    Title = "无法启动",
-                    Content = "未检测到可用 Remote，请先检测",
-                    Duration = 3,
-                    Type = "error",
-                })
-                return
-            end
             isRunning = true
             task.spawn(function() mainLoop() end)
         elseif not v then
@@ -316,7 +304,7 @@ ToggleSection:AddSlider("ClickSpeed", {
     Callback = function(v) CONFIG.ClickSpeed = v end,
 })
 
-local activeName = State.ActiveRemote and State.ActiveRemote.Name or "无"
+local activeName = State.ActiveRemote and State.ActiveRemote.Name or "未学习"
 local activeType = State.ActiveRemote and State.ActiveRemote.Type or "-"
 
 local StatsSection = MainTab:AddSection("实时数据")
@@ -331,43 +319,86 @@ StatsSection:AddParagraph({
     ),
 })
 
--- ---------- Tab 2: 检测 ----------
-local DetectTab = Window:AddTab("检测", "search")
+-- ---------- Tab 2: 已监控 Remote ----------
+local SpyTab = Window:AddTab("RemoteSpy", "search")
 
-local DetectSection = DetectTab:AddSection("Remote 检测结果")
-local detectCount = #State.DetectedRemotes
-local detectTitle = detectCount > 0
-    and string.format("检测到 %d 个 Remote", detectCount)
-    or "未检测到可用 Remote"
+local SpySection = SpyTab:AddSection("已监控的 Remote")
+local totalCount = #State.AllRemotes
+local spyTitle = string.format("已 Hook %d 个 Remote (自动)", totalCount)
 
-local detectContent = ""
-if detectCount > 0 then
+local spyContent = ""
+if totalCount > 0 then
+    local maxShow = math.min(totalCount, 15)
     local items = {}
-    for i, r in ipairs(State.DetectedRemotes) do
-        local marker = (State.ActiveRemote == r) and " ✅" or ""
+    for i = 1, maxShow do
+        local r = State.AllRemotes[i]
+        local marker = ""
+        if State.ActiveRemote and State.ActiveRemote.Name == r.Name then
+            marker = " ← 当前使用"
+        end
+        if State.CapturedRemote and State.CapturedRemote.Name == r.Name then
+            marker = " ← 已学习"
+        end
         table.insert(items, string.format("  %d. %s (%s)%s", i, r.Name, r.Type, marker))
-        if i >= 10 then break end
     end
-    detectContent = table.concat(items, "\n")
+    if totalCount > maxShow then
+        table.insert(items, string.format("  ... 还有 %d 个", totalCount - maxShow))
+    end
+    spyContent = table.concat(items, "\n")
 else
-    detectContent = "请用 RemoteSpy 抓取点击操作的 Remote，\n将名称加入脚本关键词列表"
+    spyContent = "正在扫描中..."
 end
 
-DetectSection:AddParagraph({
-    Title = detectTitle,
-    Content = detectContent,
+SpySection:AddParagraph({
+    Title = spyTitle,
+    Content = spyContent,
 })
 
-DetectSection:AddDivider()
+SpySection:AddDivider()
 
-DetectSection:AddButton({
-    Text = "重新检测",
+SpySection:AddButton({
+    Text = "重新扫描",
     Callback = function()
-        local ok = runDetection()
-        if ok and State.ActiveRemote then
+        State.AllRemotes = {}
+        State.HookedRemotes = {}
+        pcall(function() scanAndHookAllRemotes(ReplicatedStorage) end)
+        pcall(function()
+            for _, child in ipairs(workspace:GetChildren()) do
+                scanAndHookAllRemotes(child)
+            end
+        end)
+        Velvet:Notify({
+            Title = "扫描完成",
+            Content = string.format("找到 %d 个 Remote", #State.AllRemotes),
+            Duration = 3,
+            Type = "success",
+        })
+    end,
+})
+
+SpySection:AddButton({
+    Text = "手动设置 Remote",
+    Callback = function()
+        -- 列出所有 Remote 供选择
+        local names = {}
+        for _, r in ipairs(State.AllRemotes) do
+            table.insert(names, string.format("%s (%s)", r.Name, r.Type))
+        end
+        if #names == 0 then
             Velvet:Notify({
-                Title = "检测完成",
-                Content = string.format("使用: %s (%s)", State.ActiveRemote.Name, State.ActiveRemote.Type),
+                Title = "无 Remote",
+                Content = "未扫描到任何 Remote",
+                Duration = 3,
+                Type = "error",
+            })
+            return
+        end
+        -- 用第一个作为默认
+        if #State.AllRemotes > 0 then
+            State.ActiveRemote = State.AllRemotes[1]
+            Velvet:Notify({
+                Title = "已设置",
+                Content = string.format("使用: %s", State.AllRemotes[1].Name),
                 Duration = 3,
                 Type = "success",
             })
@@ -378,16 +409,23 @@ DetectSection:AddButton({
 -- ---------- Tab 3: 信息 ----------
 local InfoTab = Window:AddTab("信息", "info")
 
-local InfoSection = InfoTab:AddSection("关于脚本")
+local InfoSection = InfoTab:AddSection("使用说明")
 InfoSection:AddParagraph({
-    Title = "智能自动连点器 v3.0",
-    Content = "纯 Remote 调用，非模拟鼠标。\n\n" ..
-        "工作流程:\n" ..
-        "  1. 扫描游戏中的 RemoteEvent/RemoteFunction\n" ..
-        "  2. 匹配 40+ 点击关键词\n" ..
-        "  3. 测试可用性\n" ..
-        "  4. 直接 FireServer/InvokeServer 调用\n\n" ..
-        "不模拟鼠标，不模拟触摸，直接调 Remote。\n\n" ..
+    Title = "内置 RemoteSpy v4.0",
+    Content = "完全自动化，无需手动抓包。\n\n" ..
+        "使用方法:\n" ..
+        "  1. 执行脚本\n" ..
+        "  2. 点「学习」按钮\n" ..
+        "  3. 在游戏里点一下（你正常点击）\n" ..
+        "  4. 脚本自动捕获你点击的是哪个 Remote\n" ..
+        "  5. 开启自动连点\n\n" ..
+        "原理:\n" ..
+        "  Hook 所有 Remote 的 FireServer/InvokeServer\n" ..
+        "  你点击时脚本自动记录是哪个 Remote 被调用\n" ..
+        "  然后疯狂调用它\n\n" ..
+        "换游戏时:\n" ..
+        "  重新点「学习」→ 在游戏里点一下 → 开连点\n" ..
+        "  全程不需要抓包，不需要导出日志，不需要找我\n\n" ..
         "UI: Velvet Library\n" ..
         "按 RightShift 打开/关闭",
 })
@@ -395,41 +433,32 @@ InfoSection:AddParagraph({
 InfoSection:AddDivider()
 
 InfoSection:AddParagraph({
-    Title = "操作说明",
-    Content = "1. 执行脚本 → 自动检测\n" ..
-        "2. 按 RightShift 打开面板\n" ..
-        "3. 去「检测」标签页确认结果\n" ..
-        "4. 回「主控」开启连点\n\n" ..
-        "如果检测不到，说明游戏 Remote 命名\n" ..
-        "不在关键词列表里，需要抓包分析",
+    Title = "快捷操作",
+    Content = "🔄 换游戏: 学习 → 点击 → 连点\n" ..
+        "📋 换操作: 同上\n" ..
+        "🛑 停止: 按 RightShift 打开面板关闭",
 })
 
 -- ==================== 启动 ====================
-local methodInfo = State.ActiveRemote
-    and string.format("Remote: %s (%s)", State.ActiveRemote.Name, State.ActiveRemote.Type)
-    or "未检测到"
-
 Velvet:Notify({
-    Title = "Smart Auto Clicker",
-    Content = string.format("v3.0 已加载！%s", methodInfo),
-    Duration = 5,
-    Type = State.ActiveRemote and "success" or "warning",
+    Title = "Smart Auto Clicker v4.0",
+    Content = "内置 RemoteSpy 已就绪！点「学习」→ 在游戏里点一下 → 开连点",
+    Duration = 6,
+    Type = "success",
 })
 
 print("========================================")
-print(" Smart Auto Clicker v3.0 - Remote Click")
-print(" 纯 Remote 调用，不模拟鼠标")
+print(" Smart Auto Clicker v4.0 - 内置 RemoteSpy")
 print("========================================")
-print(" 检测结果:", methodInfo)
-if #State.DetectedRemotes > 0 then
-    for i, r in ipairs(State.DetectedRemotes) do
-        local active = (State.ActiveRemote == r) and " ← 当前使用" or ""
-        print(string.format("  %d. %s (%s) - %s%s", i, r.Name, r.Type, r.Path, active))
-        if i >= 10 then break end
-    end
-else
-    print("  未检测到可用 Remote，请用 RemoteSpy 抓包")
-end
-print("========================================")
-print(" 操作: 按 RightShift 打开面板")
+print(" 已 Hook Remote 数量:", #State.AllRemotes)
+print("")
+print(" 使用方法:")
+print("  1. 按 RightShift 打开面板")
+print("  2. 点「学习」按钮")
+print("  3. 在游戏里正常点击一次")
+print("  4. 脚本自动捕获你点击的 Remote")
+print("  5. 开启自动连点")
+print("")
+print(" 换游戏: 重新点「学习」→ 点一下 → 开连点")
+print(" 全程不需要手动抓包！")
 print("========================================")
