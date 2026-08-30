@@ -53,9 +53,18 @@ local function hookRemoteEvent(remoteEvent)
                 Args = {...},
             }
             State.IsLearning = false
+            local argsStr = "无参数"
+            local args = {...}
+            if #args > 0 then
+                local argParts = {}
+                for i, v in ipairs(args) do
+                    table.insert(argParts, tostring(v))
+                end
+                argsStr = table.concat(argParts, ", ")
+            end
             Velvet:Notify({
                 Title = "学习成功！",
-                Content = string.format("捕获到 Remote: %s (RemoteEvent)", name),
+                Content = string.format("Remote: %s\n参数: %s", name, argsStr),
                 Duration = 4,
                 Type = "success",
             })
@@ -82,9 +91,18 @@ local function hookRemoteFunction(remoteFunction)
                 Args = {...},
             }
             State.IsLearning = false
+            local argsStr = "无参数"
+            local args = {...}
+            if #args > 0 then
+                local argParts = {}
+                for i, v in ipairs(args) do
+                    table.insert(argParts, tostring(v))
+                end
+                argsStr = table.concat(argParts, ", ")
+            end
             Velvet:Notify({
                 Title = "学习成功！",
-                Content = string.format("捕获到 Remote: %s (RemoteFunction)", name),
+                Content = string.format("Remote: %s\n参数: %s", name, argsStr),
                 Duration = 4,
                 Type = "success",
             })
@@ -150,11 +168,40 @@ pcall(watchForNewRemotes)
 
 -- ==================== 核心点击 ====================
 local function fireRemoteClick(remote)
+    local ok, err
     if remote.Type == "RemoteEvent" then
-        pcall(function() remote.Object:FireServer() end)
+        if remote.Args and #remote.Args > 0 then
+            ok, err = pcall(function() remote.Object:FireServer(unpack(remote.Args)) end)
+        else
+            ok, err = pcall(function() remote.Object:FireServer() end)
+        end
     elseif remote.Type == "RemoteFunction" then
-        pcall(function() remote.Object:InvokeServer() end)
+        if remote.Args and #remote.Args > 0 then
+            ok, err = pcall(function() remote.Object:InvokeServer(unpack(remote.Args)) end)
+        else
+            ok, err = pcall(function() remote.Object:InvokeServer() end)
+        end
     end
+    
+    if not ok then
+        -- 失败时降级，尝试无参数
+        if remote.Args and #remote.Args > 0 then
+            if remote.Type == "RemoteEvent" then
+                ok, err = pcall(function() remote.Object:FireServer() end)
+            else
+                ok, err = pcall(function() remote.Object:InvokeServer() end)
+            end
+        end
+        -- 两次都失败，记录错误
+        if not ok then
+            if not State._LastError or State._LastError ~= tostring(err) then
+                State._LastError = tostring(err)
+                warn("[AutoClicker] 调用失败:", remote.Name, tostring(err))
+            end
+            return
+        end
+    end
+    
     State.TotalClicks = State.TotalClicks + 1
 end
 
@@ -306,6 +353,16 @@ ToggleSection:AddSlider("ClickSpeed", {
 
 local activeName = State.ActiveRemote and State.ActiveRemote.Name or "未学习"
 local activeType = State.ActiveRemote and State.ActiveRemote.Type or "-"
+local activeArgs = ""
+if State.ActiveRemote and State.ActiveRemote.Args and #State.ActiveRemote.Args > 0 then
+    local parts = {}
+    for i, v in ipairs(State.ActiveRemote.Args) do
+        table.insert(parts, tostring(v))
+    end
+    activeArgs = table.concat(parts, ", ")
+else
+    activeArgs = "无参数"
+end
 
 local StatsSection = MainTab:AddSection("实时数据")
 StatsSection:AddParagraph({
@@ -314,8 +371,9 @@ StatsSection:AddParagraph({
         "⚡ CPS: 0/s\n" ..
         "👆 总点击: 0\n" ..
         "⏱ 运行: 0s\n" ..
-        "🔧 Remote: %s (%s)",
-        activeName, activeType
+        "🔧 Remote: %s (%s)\n" ..
+        "📦 参数: %s",
+        activeName, activeType, activeArgs
     ),
 })
 
