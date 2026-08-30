@@ -28,21 +28,14 @@ local function findRemoteByName(name)
         return RemoteByName[name]
     end
     -- 全局搜索
-    local function search(parent)
-        for _, child in ipairs(parent:GetChildren()) do
-            if child.Name == name and (child:IsA("RemoteEvent") or child:IsA("RemoteFunction")) then
-                return child
-            end
-            local found = search(child)
-            if found then return found end
+    local all = game:GetDescendants()
+    for _, child in ipairs(all) do
+        if child.Name == name and (child:IsA("RemoteEvent") or child:IsA("RemoteFunction")) then
+            RemoteByName[name] = child
+            return child
         end
-        return nil
     end
-    local found = search(ReplicatedStorage) or search(workspace)
-    if found then
-        RemoteByName[name] = found
-    end
-    return found
+    return nil
 end
 
 -- ==================== 状态 ====================
@@ -61,6 +54,7 @@ local State = {
 -- ==================== 配置 ====================
 local CONFIG = {
     ClickSpeed = 10,
+    AutoMode = true,  -- 自动模式: 学习后自动启动
 }
 
 -- ==================== 注册 Remote 到查找表 ====================
@@ -69,7 +63,7 @@ local function registerRemote(child)
     local entry = {
         Name = child.Name,
         Type = child.ClassName,
-        Path = child:GetFullName(),
+        Path = pcall(function() return child:GetFullName() end) and child:GetFullName() or child.Name,
     }
     -- 避免重复
     for _, r in ipairs(State.AllRemotes) do
@@ -80,41 +74,22 @@ local function registerRemote(child)
     table.insert(State.AllRemotes, entry)
 end
 
-local function scanAndRegisterRemotes(parent, depth)
-    depth = depth or 0
-    if depth > 6 then return end
-    for _, child in ipairs(parent:GetChildren()) do
+local function scanAllRemotes()
+    -- 全局扫描: 用 GetDescendants 一次性扫所有
+    local all = game:GetDescendants()
+    for _, child in ipairs(all) do
         if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
             registerRemote(child)
         end
-        pcall(function()
-            for _, sub in ipairs(child:GetChildren()) do
-                if sub:IsA("Folder") or sub:IsA("Model") or sub:IsA("Configuration") then
-                    scanAndRegisterRemotes(sub, depth + 1)
-                end
-            end
-        end)
     end
 end
 
 -- 初始扫描
-pcall(function() scanAndRegisterRemotes(ReplicatedStorage) end)
-pcall(function()
-    for _, child in ipairs(workspace:GetChildren()) do
-        scanAndRegisterRemotes(child)
-    end
-end)
+pcall(scanAllRemotes)
 
--- 持续监听新 Remote
+-- 持续监听: 监听 game 全局
 pcall(function()
-    ReplicatedStorage.DescendantAdded:Connect(function(child)
-        if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
-            registerRemote(child)
-        end
-    end)
-end)
-pcall(function()
-    workspace.DescendantAdded:Connect(function(child)
+    game.DescendantAdded:Connect(function(child)
         if child:IsA("RemoteEvent") or child:IsA("RemoteFunction") then
             registerRemote(child)
         end
@@ -122,6 +97,55 @@ pcall(function()
 end)
 
 -- ==================== 内置 RemoteSpy: Hook 所有 Remote ====================
+local function autoStartClicking()
+    if not CONFIG.AutoMode then return end
+    if State.IsRunning then return end
+    if not State.CapturedRemote then return end
+
+    State.ActiveRemote = State.CapturedRemote
+
+    -- 验证 Remote 存在
+    local real = RemoteByName[State.ActiveRemote.Name]
+    if not real then real = findRemoteByName(State.ActiveRemote.Name) end
+    if not real then
+        Velvet:Notify({
+            Title = "Remote 丢失",
+            Content = string.format("找不到 %s，请重新学习", State.ActiveRemote.Name),
+            Duration = 4,
+            Type = "error",
+        })
+        return
+    end
+
+    State.IsRunning = true
+    State.StartTime = os.clock()
+    State.TotalClicks = 0
+    State._LastError = nil
+
+    Velvet:Notify({
+        Title = "自动启动",
+        Content = string.format("使用: %s\n速度: %d 次/秒", State.ActiveRemote.Name, CONFIG.ClickSpeed),
+        Duration = 3,
+        Type = "success",
+    })
+    print("[AutoClicker] 自动启动! Remote:", State.ActiveRemote.Name, "速度:", CONFIG.ClickSpeed, "次/秒")
+
+    local active = State.ActiveRemote
+    while State.IsRunning do
+        local now = os.clock()
+        for i = 1, CONFIG.ClickSpeed do
+            fireRemoteClick(active)
+        end
+        if State.TotalClicks % (CONFIG.ClickSpeed * 2) == 0 then
+            local elapsed = now - State.StartTime
+            if elapsed > 0 then
+                State.ClicksPerSecond = math.floor(State.TotalClicks / elapsed)
+            end
+        end
+        task.wait(0.01)
+    end
+end
+
 local function hookRemoteEvent(remoteEvent)
     local name = remoteEvent.Name
     local oldFireServer
@@ -143,13 +167,12 @@ local function hookRemoteEvent(remoteEvent)
                 end
                 argsStr = table.concat(parts, ", ")
             end
-            Velvet:Notify({
-                Title = "学习成功！",
-                Content = string.format("Remote: %s\n参数: %s", name, argsStr),
-                Duration = 4,
-                Type = "success",
-            })
             print("[RemoteSpy] 捕获 RemoteEvent:", name, "参数:", argsStr)
+            
+            -- 自动模式: 学习后自动启动
+            if CONFIG.AutoMode then
+                task.spawn(autoStartClicking)
+            end
         end
         return oldFireServer(self, ...)
     end)
@@ -176,13 +199,12 @@ local function hookRemoteFunction(remoteFunction)
                 end
                 argsStr = table.concat(parts, ", ")
             end
-            Velvet:Notify({
-                Title = "学习成功！",
-                Content = string.format("Remote: %s\n参数: %s", name, argsStr),
-                Duration = 4,
-                Type = "success",
-            })
             print("[RemoteSpy] 捕获 RemoteFunction:", name, "参数:", argsStr)
+            
+            -- 自动模式: 学习后自动启动
+            if CONFIG.AutoMode then
+                task.spawn(autoStartClicking)
+            end
         end
         return oldInvoke(self, ...)
     end)
@@ -404,7 +426,7 @@ end
 -- ==================== Velvet UI ====================
 local Window = Velvet:CreateWindow({
     Title = "Smart Auto Clicker",
-    SubTitle = "v5.0 · Name Lookup",
+    SubTitle = "v5.1 · 全自动",
     ToggleKey = Enum.KeyCode.RightShift,
 })
 
@@ -506,13 +528,7 @@ SpySection:AddButton({
     Callback = function()
         State.AllRemotes = {}
         RemoteByName = {}
-        State.AllRemotes = {}
-        pcall(function() scanAndRegisterRemotes(ReplicatedStorage) end)
-        pcall(function()
-            for _, child in ipairs(workspace:GetChildren()) do
-                scanAndRegisterRemotes(child)
-            end
-        end)
+        pcall(scanAllRemotes)
         Velvet:Notify({
             Title = "扫描完成",
             Content = string.format("找到 %d 个 Remote", #State.AllRemotes),
@@ -550,34 +566,43 @@ local InfoTab = Window:AddTab("信息", "info")
 
 local InfoSection = InfoTab:AddSection("使用说明")
 InfoSection:AddParagraph({
-    Title = "名字查表法 v5.0",
-    Content = "修复了 hookfunction self 引用失效问题。\n\n" ..
-        "使用方法:\n" ..
-        "  1. 执行脚本\n" ..
-        "  2. 点「学习」按钮\n" ..
-        "  3. 在游戏里点一下\n" ..
-        "  4. 开启自动连点\n\n" ..
-        "v5.0 改进:\n" ..
-        "  - 按名字查 Remote，不依赖 hook 引用\n" ..
-        "  - 调用前验证 Remote 存活\n" ..
-        "  - 参数降级: 带参数失败自动试无参数\n" ..
-        "  - 错误去重，不刷屏\n\n" ..
+    Title = "全自动模式 v5.1",
+    Content = "执行脚本后自动运行，无需手动操作。\n\n" ..
+        "自动流程:\n" ..
+        "  1. 执行脚本 → 扫描所有 Remote\n" ..
+        "  2. 自动进入学习模式 → 等待你点击\n" ..
+        "  3. 在游戏里点一下 → 自动捕获 Remote\n" ..
+        "  4. 自动开始连点！\n\n" ..
+        "你只需要做一件事: 在游戏里点一下。\n\n" ..
+        "换游戏:\n" ..
+        "  重新执行脚本 → 点一下 → 自动连点\n\n" ..
         "UI: Velvet Library\n" ..
         "按 RightShift 打开/关闭",
 })
 
 -- ==================== 启动 ====================
 Velvet:Notify({
-    Title = "Smart Auto Clicker v5.0",
-    Content = "名字查表法已就绪！点「学习」→ 在游戏里点一下 → 开连点",
+    Title = "Smart Auto Clicker v5.1",
+    Content = "全自动模式！在游戏里点一下即可开始",
     Duration = 6,
     Type = "success",
 })
 
 print("========================================")
-print(" Smart Auto Clicker v5.0 - Name Lookup")
+print(" Smart Auto Clicker v5.1 - Fully Auto")
 print(" 已扫描 Remote 数量:", #State.AllRemotes)
 print("========================================")
-print(" v5.0 改进: 名字查表法，不依赖 hook 引用")
-print(" 使用方法: 学习 → 点一下 → 开连点")
+print(" 全自动模式: 在游戏里点一下 → 自动连点")
 print("========================================")
+
+-- 自动进入学习模式
+task.delay(1, function()
+    State.IsLearning = true
+    print("[RemoteSpy] 自动学习模式已开启，在游戏里点击一次...")
+    task.delay(120, function()
+        if State.IsLearning then
+            State.IsLearning = false
+            warn("[RemoteSpy] 超时: 120 秒内未检测到点击")
+        end
+    end)
+end)
