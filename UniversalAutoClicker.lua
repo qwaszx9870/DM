@@ -104,18 +104,20 @@ local function autoStartClicking()
 
     State.ActiveRemote = State.CapturedRemote
 
-    -- 验证 Remote 存在
-    local real = RemoteByName[State.ActiveRemote.Name]
-    if not real then real = findRemoteByName(State.ActiveRemote.Name) end
+    -- 验证 Remote: 先用闭包引用，再用名字查表
+    local real = State.ActiveRemote.Object
+    if not real or not pcall(function() return real.Parent end) or not real.Parent then
+        real = RemoteByName[State.ActiveRemote.Name]
+        if real and not pcall(function() return real.Parent end) or not real.Parent then
+            real = findRemoteByName(State.ActiveRemote.Name)
+        end
+    end
     if not real then
-        Velvet:Notify({
-            Title = "Remote 丢失",
-            Content = string.format("找不到 %s，请重新学习", State.ActiveRemote.Name),
-            Duration = 4,
-            Type = "error",
-        })
+        warn("[AutoClicker] 自动启动失败: 找不到 Remote:", State.ActiveRemote.Name)
         return
     end
+    State.ActiveRemote.Object = real
+    RemoteByName[State.ActiveRemote.Name] = real
 
     State.IsRunning = true
     State.StartTime = os.clock()
@@ -148,12 +150,14 @@ end
 
 local function hookRemoteEvent(remoteEvent)
     local name = remoteEvent.Name
+    local realObject = remoteEvent  -- 闭包引用，可靠
     local oldFireServer
     oldFireServer = hookfunction(remoteEvent.FireServer, function(self, ...)
         if State.IsLearning then
             local args = {...}
             State.CapturedRemote = {
                 Name = name,
+                Object = realObject,  -- 闭包引用，不是 hook 的 self
                 Type = "RemoteEvent",
                 Args = args,
             }
@@ -169,7 +173,6 @@ local function hookRemoteEvent(remoteEvent)
             end
             print("[RemoteSpy] 捕获 RemoteEvent:", name, "参数:", argsStr)
             
-            -- 自动模式: 学习后自动启动
             if CONFIG.AutoMode then
                 task.spawn(autoStartClicking)
             end
@@ -180,12 +183,14 @@ end
 
 local function hookRemoteFunction(remoteFunction)
     local name = remoteFunction.Name
+    local realObject = remoteFunction  -- 闭包引用，可靠
     local oldInvoke
     oldInvoke = hookfunction(remoteFunction.InvokeServer, function(self, ...)
         if State.IsLearning then
             local args = {...}
             State.CapturedRemote = {
                 Name = name,
+                Object = realObject,  -- 闭包引用，不是 hook 的 self
                 Type = "RemoteFunction",
                 Args = args,
             }
@@ -201,7 +206,6 @@ local function hookRemoteFunction(remoteFunction)
             end
             print("[RemoteSpy] 捕获 RemoteFunction:", name, "参数:", argsStr)
             
-            -- 自动模式: 学习后自动启动
             if CONFIG.AutoMode then
                 task.spawn(autoStartClicking)
             end
@@ -244,25 +248,43 @@ pcall(function()
     end)
 end)
 
--- ==================== 核心点击 (名字查表法) ====================
+-- ==================== 核心点击 (闭包引用优先 + 名字查表兜底) ====================
 local function fireRemoteClick(remoteInfo)
-    -- 按名字查找真实 Remote 对象
-    local realRemote = RemoteByName[remoteInfo.Name]
-    if not realRemote then
-        -- 缓存过期，重新搜索
-        realRemote = findRemoteByName(remoteInfo.Name)
-        if not realRemote then
-            warn("[AutoClicker] 找不到 Remote:", remoteInfo.Name)
-            return
+    -- 1️⃣ 优先用闭包引用 (Object)
+    local realRemote = remoteInfo.Object
+
+    -- 2️⃣ 验证闭包引用还活着
+    if realRemote then
+        if not pcall(function() return realRemote.Parent end) or not realRemote.Parent then
+            realRemote = nil
         end
     end
 
-    -- 验证存活
-    if not realRemote.Parent then
-        RemoteByName[remoteInfo.Name] = nil
-        realRemote = findRemoteByName(remoteInfo.Name)
-        if not realRemote then return end
+    -- 3️⃣ 闭包引用失效，用名字查表
+    if not realRemote then
+        realRemote = RemoteByName[remoteInfo.Name]
+        if realRemote then
+            if not pcall(function() return realRemote.Parent end) or not realRemote.Parent then
+                RemoteByName[remoteInfo.Name] = nil
+                realRemote = nil
+            end
+        end
     end
+
+    -- 4️⃣ 名字查表也失效，全局搜索
+    if not realRemote then
+        realRemote = findRemoteByName(remoteInfo.Name)
+    end
+
+    -- 5️⃣ 全找不到，放弃
+    if not realRemote then
+        warn("[AutoClicker] 找不到 Remote:", remoteInfo.Name, "| 闭包和搜索都失败")
+        return
+    end
+
+    -- 更新闭包引用 (下次直接用)
+    remoteInfo.Object = realRemote
+    RemoteByName[remoteInfo.Name] = realRemote
 
     local ok, err
     local args = remoteInfo.Args or {}
@@ -282,7 +304,6 @@ local function fireRemoteClick(remoteInfo)
     end
 
     if not ok then
-        -- 降级: 无参数重试
         if #args > 0 then
             if remoteInfo.Type == "RemoteEvent" then
                 ok, err = pcall(function() realRemote:FireServer() end)
@@ -298,7 +319,6 @@ local function fireRemoteClick(remoteInfo)
             end
             return
         end
-        -- 降级成功，更新参数为空
         remoteInfo.Args = {}
     end
 
@@ -379,9 +399,12 @@ local function mainLoop()
     end
 
     -- 启动前验证 Remote 存在
-    local real = RemoteByName[State.ActiveRemote.Name]
-    if not real then
-        real = findRemoteByName(State.ActiveRemote.Name)
+    local real = State.ActiveRemote.Object
+    if not real or not pcall(function() return real.Parent end) or not real.Parent then
+        real = RemoteByName[State.ActiveRemote.Name]
+        if real and not pcall(function() return real.Parent end) or not real.Parent then
+            real = findRemoteByName(State.ActiveRemote.Name)
+        end
     end
     if not real then
         Velvet:Notify({
@@ -394,6 +417,8 @@ local function mainLoop()
         State.ActiveRemote = nil
         return
     end
+    State.ActiveRemote.Object = real
+    RemoteByName[State.ActiveRemote.Name] = real
 
     State.IsRunning = true
     State.StartTime = os.clock()
